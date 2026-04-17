@@ -240,7 +240,6 @@ def generate_caption(news_item):
 标题：{news_item['title']}
 摘要：{news_item['description']}
 分类：{news_item['category']}
-分类：{news_item['category']}
 
 要求：
 - 标题要吸引眼球，引发好奇心
