@@ -15,6 +15,8 @@ from datetime import datetime, timezone, timedelta
 # ========== 配置 ==========
 MCP_SERVER = "http://192.168.178.43:18060/mcp"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+AISONNET_API_KEY = os.environ.get("AISONNET_API_KEY", "")
+AISONNET_BASE_URL = os.environ.get("AISONNET_BASE_URL", "https://newapi.aisonnet.org/v1")
 RSS_URL = "https://www.rte.ie/feeds/rss/?index=/news/&limit=5"
 LOCAL_OUTPUT = "/home/pi5/.openclaw/workspace/xhs_output"
 MACMINI_OUTPUT = "/Users/yimingliu/xiaohongshu/images"
@@ -69,29 +71,110 @@ def openai(messages, model="gpt-4o", max_tokens=800):
     data = resp.json()
     return data["choices"][0]["message"]["content"]
 
-def generate_image(prompt, reference_image_url=None):
-    """用 OpenAI gpt-image-1 生成图片，支持参考图"""
-    payload = {
-        "model": "gpt-image-1",
-        "prompt": prompt,
-        "n": 1,
-        "size": "1024x1536"
-    }
-    if reference_image_url:
-        payload["input_image_urls"] = [reference_image_url]
-    resp = requests.post("https://api.openai.com/v1/images/generations", json=payload, headers={
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
-    image_base64 = data["data"][0].get("b64_json", "")
-    if image_base64:
-        return base64.b64decode(image_base64)
-    image_url = data["data"][0]["url"]
-    img_resp = requests.get(image_url, timeout=60)
+def _download_image_bytes(image_url):
+    """下载图片 URL"""
+    img_resp = requests.get(image_url, timeout=120)
     img_resp.raise_for_status()
     return img_resp.content
+
+
+def _extract_url_from_text(text):
+    """从模型文本响应里提取图片 URL"""
+    import re
+    if not text:
+        return None
+    match = re.search(r'https?://[^\s)\]"]+', text)
+    return match.group(0) if match else None
+
+
+
+def _extract_aisonnet_image_bytes(data):
+    """尽量兼容不同返回格式，提取图片字节"""
+    # 1) OpenAI image-style: {data:[{b64_json|url}]}
+    if isinstance(data, dict) and isinstance(data.get("data"), list) and data["data"]:
+        first = data["data"][0]
+        if isinstance(first, dict):
+            image_base64 = first.get("b64_json") or first.get("base64")
+            if image_base64:
+                return base64.b64decode(image_base64)
+            image_url = first.get("url")
+            if image_url:
+                return _download_image_bytes(image_url)
+
+    # 2) Chat completion style: choices[0].message.content
+    try:
+        content = data["choices"][0]["message"]["content"]
+        if isinstance(content, str):
+            image_url = _extract_url_from_text(content)
+            if image_url:
+                return _download_image_bytes(image_url)
+        elif isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                # 2a) 直接给 image_url
+                image_url_obj = item.get("image_url") or {}
+                if isinstance(image_url_obj, dict) and image_url_obj.get("url"):
+                    return _download_image_bytes(image_url_obj["url"])
+                # 2b) 文本里带 URL
+                if item.get("type") == "text":
+                    image_url = _extract_url_from_text(item.get("text", ""))
+                    if image_url:
+                        return _download_image_bytes(image_url)
+                # 2c) 直接给 base64
+                if item.get("b64_json") or item.get("base64"):
+                    return base64.b64decode(item.get("b64_json") or item.get("base64"))
+    except Exception:
+        pass
+
+    raise ValueError(f"无法从图片接口响应中提取图片数据: {json.dumps(data, ensure_ascii=False)[:800]}")
+
+
+
+def generate_image(prompt, reference_image_url=None):
+    """用 Aisonnet seedream-5.0 生成/编辑图片"""
+    if not AISONNET_API_KEY:
+        raise RuntimeError("缺少 AISONNET_API_KEY 环境变量")
+
+    headers = {
+        "Authorization": AISONNET_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    content = [
+        {
+            "type": "text",
+            "text": prompt
+        }
+    ]
+    if reference_image_url:
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": reference_image_url
+            }
+        })
+
+    payload = {
+        "model": "seedream-5.0",
+        "messages": [
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        "max_tokens": 150,
+        "temperature": 0.7
+    }
+
+    resp = requests.post(
+        f"{AISONNET_BASE_URL}/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=180
+    )
+    resp.raise_for_status()
+    return _extract_aisonnet_image_bytes(resp.json())
 
 # ========== RSS 抓取 ==========
 def fetch_rss():
@@ -144,13 +227,13 @@ def generate_caption(news_item):
 标题：{news_item['title']}
 摘要：{news_item['description']}
 分类：{news_item['category']}
-链接：{news_item['link']}
+分类：{news_item['category']}
 
 要求：
 - 标题要吸引眼球，引发好奇心
 - 正文结合爱尔兰当地视角，增加亲切感
 - 标签要精准且有热度
-- 正文末尾加上原文链接"""
+- 不要放任何外部链接"""
 
     result_text = openai([
         {"role": "system", "content": system_prompt},
@@ -170,21 +253,19 @@ def generate_caption(news_item):
 
 # ========== 封面图生成 ==========
 def generate_cover(caption, news_item):
-    """生成小红书封面图：用RTE真实新闻图作为参考，生成文艺自然风格"""
+    """生成小红书封面图：用 RTE 新闻图作参考，走 Aisonnet seedream-5.0"""
     news_image = news_item.get("image", "")
     category = news_item.get("category", "新闻")
-    
-    prompt = f"""A beautiful vertical 3:4 magazine cover for a Chinese social media post about Irish news.
-    
-    Subject: Irish news — {caption['title']}
-    Category: {category}
-    
-    Style: Elegant editorial photography aesthetic. Warm tones with subtle Irish green accents. 
-    Cinematic composition, soft lighting, magazine-quality. Natural and authentic — NOT looking AI-generated.
-    No text on the image. Keep it clean and sophisticated. The photo should look like it was taken by a professional photographer at RTE Ireland.
-    
-    If a reference photo is provided, use it as inspiration and maintain the photographic authenticity.
-    Keep the image feeling real, warm, human — like a quality news magazine cover."""
+
+    prompt = f"""请生成一张竖版精美配图，比例接近 3:4，适合社交媒体封面。
+主题：{caption['title']}
+要求：
+1. 整体风格像高质量杂志封面，真实摄影感，干净自然，不要明显 AI 感
+2. 画面构图高级，光线柔和，色调温暖
+3. 不要在图片上添加任何文字、水印、logo、边框
+4. 如果提供了参考图片，请保留主体和现场感，但整体画面更精致
+5. 颜色克制，偏高级感，可带一点绿色元素
+6. 输出一张完整封面图"""
 
     image_data = generate_image(prompt, reference_image_url=news_image if news_image else None)
     return image_data
@@ -261,18 +342,18 @@ def main():
                    check=True, capture_output=True)
     print(f"   已传到 Mac Mini: {macmini_img_path}")
 
-    print(f"\n⏭️  DRY RUN — 跳过发布步骤")
-    print(f"   图片路径: {macmini_img_path}")
-    print(f"   标题: {caption['title']}")
-    print(f"   正文: {caption['body'][:100]}...")
-    print(f"   标签: {caption['tags']}")
-    print(f"\n✅ Dry run 完成! [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
-    return
+    if DRY_RUN:
+        print(f"\n⏭️  DRY RUN — 跳过发布步骤")
+        print(f"   图片路径: {macmini_img_path}")
+        print(f"   标题: {caption['title']}")
+        print(f"   正文: {caption['body'][:100]}...")
+        print(f"   标签: {caption['tags']}")
+        print(f"\n✅ Dry run 完成! [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
+        return
 
-    # 以下为实际发布步骤（DRY RUN 时不执行）
     # 6. 发布小红书（用 Mac Mini 本地图片路径）
     print("📤 发布小红书（浏览器自动化，约60秒）...")
-    full_content = caption['body'] + f"\n\n🔗 原文: {top_news['link']}\n\n📍 来源: RTE News Ireland"
+    full_content = caption['body'] + f"\n\n📍 来源: RTE News Ireland"
     img_remote_path = f"{MACMINI_OUTPUT}/cover-{timestamp}.png"
     result = mcp_call(session_id, "publish_content", {
         "title": caption['title'],
