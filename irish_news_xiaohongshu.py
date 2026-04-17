@@ -56,15 +56,17 @@ def mcp_call(session_id, tool_name, arguments, timeout=120):
         # 纯文本响应（如登录状态）
         return {"text": content}
 
-# ========== OpenAI 工具 ==========
-def openai(messages, model="gpt-4o", max_tokens=800):
-    """调用 OpenAI API"""
-    resp = requests.post("https://api.openai.com/v1/chat/completions", json={
+# ========== LLM 文本生成 ==========
+def llm_chat(messages, model="claude-sonnet-4-6", max_tokens=800):
+    """调用 Aisonnet API (claude-sonnet-4-6)"""
+    if not AISONNET_API_KEY:
+        raise RuntimeError("缺少 AISONNET_API_KEY 环境变量")
+    resp = requests.post(f"{AISONNET_BASE_URL}/chat/completions", json={
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens
     }, headers={
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Authorization": AISONNET_API_KEY,
         "Content-Type": "application/json"
     }, timeout=60)
     resp.raise_for_status()
@@ -235,7 +237,7 @@ def generate_caption(news_item):
 - 标签要精准且有热度
 - 不要放任何外部链接"""
 
-    result_text = openai([
+    result_text = llm_chat([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ], max_tokens=600)
