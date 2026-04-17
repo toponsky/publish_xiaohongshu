@@ -12,9 +12,20 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # 没装 python-dotenv 就用系统环境变量
+
 # ========== 配置 ==========
 MCP_SERVER = "http://192.168.178.43:18060/mcp"
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+# 文本生成 (claude-sonnet-4-6 via gpt-agent.cc)
+GPT_AGENT_API_KEY = os.environ.get("GPT_AGENT_API_KEY", "")
+GPT_AGENT_BASE_URL = os.environ.get("GPT_AGENT_BASE_URL", "https://gpt-agent.cc/v1")
+
+# 图片生成 (seedream-5.0 via aisonnet)
 AISONNET_API_KEY = os.environ.get("AISONNET_API_KEY", "")
 AISONNET_BASE_URL = os.environ.get("AISONNET_BASE_URL", "https://newapi.aisonnet.org/v1")
 RSS_URL = "https://www.rte.ie/feeds/rss/?index=/news/&limit=5"
@@ -58,15 +69,15 @@ def mcp_call(session_id, tool_name, arguments, timeout=120):
 
 # ========== LLM 文本生成 ==========
 def llm_chat(messages, model="claude-sonnet-4-6", max_tokens=800):
-    """调用 Aisonnet API (claude-sonnet-4-6)"""
-    if not AISONNET_API_KEY:
-        raise RuntimeError("缺少 AISONNET_API_KEY 环境变量")
-    resp = requests.post(f"{AISONNET_BASE_URL}/chat/completions", json={
+    """调用 gpt-agent.cc API (claude-sonnet-4-6)"""
+    if not GPT_AGENT_API_KEY:
+        raise RuntimeError("缺少 GPT_AGENT_API_KEY 环境变量")
+    resp = requests.post(f"{GPT_AGENT_BASE_URL}/chat/completions", json={
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens
     }, headers={
-        "Authorization": AISONNET_API_KEY,
+        "Authorization": f"Bearer {GPT_AGENT_API_KEY}",
         "Content-Type": "application/json"
     }, timeout=60)
     resp.raise_for_status()
