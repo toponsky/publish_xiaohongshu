@@ -265,10 +265,27 @@ def generate_caption(news_item):
     return {"title": news_item['title'][:20], "body": result_text, "tags": ["#爱尔兰", "#国际新闻"]}
 
 # ========== 封面图生成 ==========
-def generate_cover(caption, news_item):
+def generate_cover(caption, news_item, count=2):
     """生成小红书封面图：用 RTE 新闻图作参考，走 Aisonnet seedream-5.0"""
     news_image = news_item.get("image", "")
     category = news_item.get("category", "新闻")
+
+    prompt_tpl = f"""请生成一张竖版精美配图，比例接近 3:4，适合社交媒体封面。
+主题：{caption['title']}
+要求：
+1. 整体风格像高质量杂志封面，真实摄影感，干净自然，不要明显 AI 感
+2. 画面构图高级，光线柔和，色调温暖
+3. 不要在图片上添加任何文字、水印、logo、边框
+4. 如果提供了参考图片，请保留主体和现场感，但整体画面更精致
+5. 颜色克制，偏高级感，可带一点绿色元素
+6. 输出一张完整封面图"""
+
+    images = []
+    for i in range(count):
+        image_data = generate_image(prompt_tpl, reference_image_url=news_image if news_image else None)
+        images.append(image_data)
+
+    return images
 
     prompt = f"""请生成一张竖版精美配图，比例接近 3:4，适合社交媒体封面。
 主题：{caption['title']}
@@ -341,23 +358,32 @@ def main():
     print("🎨 生成封面图...")
     os.makedirs(LOCAL_OUTPUT, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d")
-    img_data = generate_cover(caption, top_news)
-    img_path = f"{LOCAL_OUTPUT}/cover-{timestamp}.png"
-    with open(img_path, "wb") as f:
-        f.write(img_data)
-    print(f"   封面图已保存: {img_path}")
+    img_datas = generate_cover(caption, top_news, count=2)
+    
+    # 保存所有封面图
+    img_paths = []
+    for i, img_data in enumerate(img_datas):
+        suffix = "" if i == 0 else f"-{i+1}"
+        img_path = f"{LOCAL_OUTPUT}/cover-{timestamp}{suffix}.png"
+        with open(img_path, "wb") as f:
+            f.write(img_data)
+        img_paths.append(img_path)
+    print(f"   封面图已保存: {len(img_paths)}张")
 
     # 5b. 把图片传到 Mac Mini（MCP 浏览器自动化需要 Mac 本地路径）
     print("📡 传输图片到 Mac Mini...")
-    macmini_img_path = f"{MACMINI_OUTPUT}/cover-{timestamp}.png"
-    import subprocess
-    subprocess.run(["scp", img_path, f"yimingliu@MacMini:{macmini_img_path}"],
-                   check=True, capture_output=True)
-    print(f"   已传到 Mac Mini: {macmini_img_path}")
+    macmini_img_paths = []
+    for i, img_path in enumerate(img_paths):
+        suffix = "" if i == 0 else f"-{i+1}"
+        macmini_path = f"{MACMINI_OUTPUT}/cover-{timestamp}{suffix}.png"
+        subprocess.run(["scp", img_path, f"yimingliu@MacMini:{macmini_path}"],
+                       check=True, capture_output=True)
+        macmini_img_paths.append(macmini_path)
+    print(f"   已传到 Mac Mini: {len(macmini_img_paths)}张")
 
     if DRY_RUN:
         print(f"\n⏭️  DRY RUN — 跳过发布步骤")
-        print(f"   图片路径: {macmini_img_path}")
+        print(f"   图片路径: {macmini_img_paths}")
         print(f"   标题: {caption['title']}")
         print(f"   正文: {caption['body'][:100]}...")
         print(f"   标签: {caption['tags']}")
@@ -367,11 +393,10 @@ def main():
     # 6. 发布小红书（用 Mac Mini 本地图片路径）
     print("📤 发布小红书（浏览器自动化，约60秒）...")
     full_content = caption['body'] + f"\n\n📍 来源: RTE News Ireland"
-    img_remote_path = f"{MACMINI_OUTPUT}/cover-{timestamp}.png"
     result = mcp_call(session_id, "publish_content", {
         "title": caption['title'],
         "content": full_content,
-        "images": [macmini_img_path],  # Mac Mini 本地路径，MCP 浏览器需要
+        "images": macmini_img_paths,  # Mac Mini 本地路径，MCP 浏览器需要
         "tags": [tag.lstrip('#') for tag in caption['tags']],
         "visibility": "公开可见",
         "is_original": False
@@ -385,7 +410,7 @@ def main():
         "date": timestamp,
         "news": top_news,
         "caption": caption,
-        "img_path": img_path,
+        "img_paths": img_paths,
         "publish_result": result
     }
     record_path = f"{COVERAGE_DIR}/{timestamp}.json"
